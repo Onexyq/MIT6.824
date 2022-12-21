@@ -1,10 +1,54 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"strconv"
+	"time"
+)
 
+type Task struct {
+	TaskType   TaskType
+	TaskId     int
+	ReducerNum int
+	Filename   string
+}
+
+// TaskArgs for RPC
+type TaskArgs struct{}
+
+//Task Type
+type TaskType int
+
+const (
+	MapTask TaskType = iota
+	ReduceTask
+	WaitingTask
+	ExitTask
+)
+
+//Map-Reduce Phase
+type Phase int
+
+const (
+	MapPhase Phase = iota
+	ReducePhase
+	AllDone
+)
+
+// Task State
+type State int
+
+const (
+	Working State = iota
+	Waiting
+	Done
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,7 +68,6 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-
 //
 // main/mrworker.go calls this function.
 //
@@ -32,9 +75,97 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	keepFlag := true
+	for keepFlag {
+		task := GetTask()
+		switch task.TaskType {
+		case MapTask:
+			{
+				DoMapTask(mapf, &task)
+				callDone()
+			}
+		case WaitingTask:
+			{
+				fmt.Println("All tasks are in progress, please wait...")
+				time.Sleep(time.Second)
+			}
+		case ExitTask:
+			{
+				fmt.Println("Task about :[", task.TaskId, "] is terminated...")
+				keepFlag = false
+			}
+
+		}
+	}
 
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
+
+}
+
+func GetTask() Task {
+	args := TaskArgs{}
+	reply := Task{}
+	ok := call("Coordinator.PollTask", &args, &reply)
+
+	if ok {
+		fmt.Println(reply)
+	} else {
+		fmt.Printf("call failed!\n")
+	}
+	return reply
+
+}
+
+//Do Map Task
+func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
+	var intermediate []KeyValue
+	filename := response.Filename
+
+	// read input file and pass to Map
+	file, err := os.Open(filename)
+	if err != nil {
+		log.Fatalf("cannot open %v", filename)
+	}
+
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", filename)
+	}
+	file.Close()
+	intermediate = mapf(filename, string(content))
+
+	// partition into NxM buckets
+	reducerNum := response.ReducerNum
+	hashedKV := make([][]KeyValue, reducerNum)
+	for _, kv := range intermediate {
+		hashedKV[ihash(kv.Key)%reducerNum] = append(hashedKV[ihash(kv.Key)%reducerNum], kv)
+	}
+	for i := 0; i < reducerNum; i++ {
+		oname := "./MapOut/mr-tmp-" + strconv.Itoa(response.TaskId) + "-" + strconv.Itoa(i)
+		ofile, _ := os.Create(oname)
+		enc := json.NewEncoder(ofile)
+		for _, kv := range hashedKV[i] {
+			enc.Encode(kv)
+		}
+		ofile.Close()
+	}
+
+}
+
+// callDone Call RPC to mark the task as completed
+func callDone() Task {
+
+	args := Task{}
+	reply := Task{}
+	ok := call("Coordinator.MarkFinished", &args, &reply)
+
+	if ok {
+		fmt.Println(reply)
+	} else {
+		fmt.Printf("Coordinator.MarkFinished() call failed!\n")
+	}
+	return reply
 
 }
 
