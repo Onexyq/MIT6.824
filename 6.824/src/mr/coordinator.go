@@ -2,11 +2,14 @@ package mr
 
 import (
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -106,7 +109,9 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	return &c
 }
 
-//Tasks Initialization
+//
+//Map Tasks Generation
+//
 func (c *Coordinator) makeMapTasks(files []string) {
 	for _, v := range files {
 		id := c.generateTaskId()
@@ -114,7 +119,7 @@ func (c *Coordinator) makeMapTasks(files []string) {
 			TaskType:   MapTask,
 			TaskId:     id,
 			ReducerNum: c.ReducerNum,
-			Filename:   v,
+			FileSlice:  []string{v},
 		}
 
 		taskMetaInfo := TaskMetaInfo{
@@ -125,6 +130,30 @@ func (c *Coordinator) makeMapTasks(files []string) {
 
 		fmt.Println("built a map task:", &task)
 		c.TaskChannelMap <- &task
+	}
+}
+
+//
+//Reduce Tasks Generation
+//
+func (c *Coordinator) makeReduceTasks() {
+	for i := 0; i < c.ReducerNum; i++ {
+		id := c.generateTaskId()
+		task := Task{
+			TaskType:   ReduceTask,
+			TaskId:     id,
+			ReducerNum: c.ReducerNum,
+			FileSlice:  selectReduceName(i),
+		}
+
+		taskMetaInfo := TaskMetaInfo{
+			state:   Waiting,
+			TaskAdr: &task,
+		}
+		c.taskMetaHolder.acceptMeta(&taskMetaInfo)
+
+		fmt.Println("built a reduce task:", &task)
+		c.TaskChannelReduce <- &task
 	}
 }
 
@@ -146,33 +175,54 @@ func (t *TaskMetaHolder) acceptMeta(TaskInfo *TaskMetaInfo) bool {
 	return true
 }
 
+func selectReduceName(reduceNum int) []string {
+	var s []string
+	dir, _ := os.Getwd()
+	path := dir + "/MapOut/"
+	files, _ := ioutil.ReadDir(path)
+	for _, fi := range files {
+		if strings.HasPrefix(fi.Name(), "mr-tmp") && strings.HasSuffix(fi.Name(), strconv.Itoa(reduceNum)) {
+			s = append(s, fi.Name())
+		}
+	}
+	return s
+}
+
 //Task Dispatch
 func (c *Coordinator) PollTask(args *TaskArgs, reply *Task) error {
 	// mutex to prevent race between workers
 	mu.Lock()
 	defer mu.Unlock()
 
-	switch c.MrPhase {
-	case MapPhase:
-		{
-			if len(c.TaskChannelMap) > 0 {
-				*reply = *<-c.TaskChannelMap
-				if !c.taskMetaHolder.judgeState(reply.TaskId) {
-					fmt.Printf("taskid[ %d ] is running\n", reply.TaskId)
-				}
-			} else {
-				reply.TaskType = WaitingTask
-				if c.taskMetaHolder.checkTaskDone() {
-					c.toNextPhase()
-				}
-				return nil
+	if c.MrPhase == MapPhase {
+		if len(c.TaskChannelMap) > 0 {
+			*reply = *<-c.TaskChannelMap
+			if !c.taskMetaHolder.judgeState(reply.TaskId) {
+				fmt.Printf("taskid[ %d ] is running\n", reply.TaskId)
 			}
-		}
-	default:
-		{
-			reply.TaskType = ExitTask
+		} else {
+			reply.TaskType = WaitingTask
+			if c.taskMetaHolder.checkTaskDone() {
+				c.toNextPhase()
+			}
+			return nil
 		}
 
+	} else if c.MrPhase == ReducePhase {
+		if len(c.TaskChannelReduce) > 0 {
+			*reply = *<-c.TaskChannelReduce
+			if !c.taskMetaHolder.judgeState(reply.TaskId) {
+				fmt.Printf("taskid[ %d ] is running\n", reply.TaskId)
+			}
+		} else {
+			reply.TaskType = WaitingTask
+			if c.taskMetaHolder.checkTaskDone() {
+				c.toNextPhase()
+			}
+			return nil
+		}
+	} else {
+		reply.TaskType = ExitTask
 	}
 
 	return nil
@@ -180,14 +230,11 @@ func (c *Coordinator) PollTask(args *TaskArgs, reply *Task) error {
 
 func (c *Coordinator) toNextPhase() {
 	if c.MrPhase == MapPhase {
-		//c.makeReduceTasks()
-
-		// todo
-		c.MrPhase = AllDone
+		c.makeReduceTasks()
+		c.MrPhase = ReducePhase
 	} else if c.MrPhase == ReducePhase {
 		c.MrPhase = AllDone
 	}
-
 }
 
 func (t *TaskMetaHolder) checkTaskDone() bool {
@@ -199,7 +246,6 @@ func (t *TaskMetaHolder) checkTaskDone() bool {
 		reduceUnDoneNum = 0
 	)
 
-	//Parse through Task Map
 	for _, v := range t.MetaMap {
 		if v.TaskAdr.TaskType == MapTask {
 			if v.state == Done {
@@ -248,13 +294,21 @@ func (c *Coordinator) MarkFinished(args *Task, reply *Task) error {
 	if args.TaskType == MapTask {
 
 		meta, ok := c.taskMetaHolder.MetaMap[args.TaskId]
-
 		//prevent a duplicated work which returned from another worker
 		if ok && meta.state == Working {
 			meta.state = Done
 			fmt.Printf("Map task Id[%d] finished.\n", args.TaskId)
 		} else {
 			fmt.Printf("Map task Id[%d] finished already ! ! !\n", args.TaskId)
+		}
+	} else if args.TaskType == ReduceTask {
+		meta, ok := c.taskMetaHolder.MetaMap[args.TaskId]
+		//prevent a duplicated work which returned from another worker
+		if ok && meta.state == Working {
+			meta.state = Done
+			fmt.Printf("Reduce task Id[%d] is finished.\n", args.TaskId)
+		} else {
+			fmt.Printf("Reduce task Id[%d] is finished,already ! ! !\n", args.TaskId)
 		}
 	} else {
 		panic("The task type is undefined ! ! !")

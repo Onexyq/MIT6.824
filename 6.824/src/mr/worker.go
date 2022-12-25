@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -16,7 +17,7 @@ type Task struct {
 	TaskType   TaskType
 	TaskId     int
 	ReducerNum int
-	Filename   string
+	FileSlice  []string
 }
 
 // TaskArgs for RPC
@@ -50,6 +51,14 @@ const (
 	Done
 )
 
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
 //
 // Map functions return a slice of KeyValue.
 //
@@ -81,8 +90,13 @@ func Worker(mapf func(string, string) []KeyValue,
 		switch task.TaskType {
 		case MapTask:
 			{
-				DoMapTask(mapf, &task)
-				callDone()
+				doMapTask(mapf, &task)
+				callDone(&task)
+			}
+		case ReduceTask:
+			{
+				doReduceTask(reducef, &task)
+				callDone(&task)
 			}
 		case WaitingTask:
 			{
@@ -117,10 +131,12 @@ func GetTask() Task {
 
 }
 
+//
 //Do Map Task
-func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
+//
+func doMapTask(mapf func(string, string) []KeyValue, response *Task) {
 	var intermediate []KeyValue
-	filename := response.Filename
+	filename := response.FileSlice[0]
 
 	// read input file and pass to Map
 	file, err := os.Open(filename)
@@ -153,10 +169,63 @@ func DoMapTask(mapf func(string, string) []KeyValue, response *Task) {
 
 }
 
-// callDone Call RPC to mark the task as completed
-func callDone() Task {
+//
+//Do Reduce Task
+//
+func doReduceTask(reducef func(string, []string) string, response *Task) {
+	reduceFileNum := response.TaskId
+	intermediate := shuffle(response.FileSlice)
+	dir, _ := os.Getwd()
+	tempFile, err := ioutil.TempFile(dir+"/ReduceOut/", "mr-tmp-*")
+	fmt.Printf(dir + "/ReduceOut/")
+	if err != nil {
+		log.Fatal("Failed to create temp file", err)
+	}
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		var values []string
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+		fmt.Fprintf(tempFile, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
+	tempFile.Close()
+	fn := fmt.Sprintf(dir+"/ReduceOut/mr-out-%d", reduceFileNum)
+	os.Rename(tempFile.Name(), fn)
+}
 
-	args := Task{}
+func shuffle(files []string) []KeyValue {
+	var kva []KeyValue
+	dir, _ := os.Getwd()
+	for _, f := range files {
+		path := dir + "/MapOut/" + f
+		file, _ := os.Open(path)
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			kva = append(kva, kv)
+		}
+		file.Close()
+	}
+	sort.Sort(ByKey(kva))
+	return kva
+}
+
+//
+// callDone Call RPC to mark the task as completed
+//
+func callDone(f *Task) Task {
+
+	args := f
 	reply := Task{}
 	ok := call("Coordinator.MarkFinished", &args, &reply)
 
