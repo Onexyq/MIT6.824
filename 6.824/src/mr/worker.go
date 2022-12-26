@@ -51,14 +51,6 @@ const (
 	Done
 )
 
-// for sorting by key.
-type ByKey []KeyValue
-
-// for sorting by key.
-func (a ByKey) Len() int           { return len(a) }
-func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
-func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
-
 //
 // Map functions return a slice of KeyValue.
 //
@@ -66,6 +58,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -100,16 +100,21 @@ func Worker(mapf func(string, string) []KeyValue,
 			}
 		case WaitingTask:
 			{
-				fmt.Println("All tasks are in progress, please wait...")
-				time.Sleep(time.Second)
+				//fmt.Println("All tasks are in progress, please wait...")
+				time.Sleep(time.Second * 5)
 			}
 		case ExitTask:
 			{
-				fmt.Println("Task about :[", task.TaskId, "] is terminated...")
+				time.Sleep(time.Second)
+				//fmt.Println("All tasks are Done ,will be exiting...")
 				keepFlag = false
 			}
-
+		default:
+			{
+				keepFlag = false
+			}
 		}
+		time.Sleep(time.Second)
 	}
 
 	// uncomment to send the Example RPC to the coordinator.
@@ -123,9 +128,10 @@ func GetTask() Task {
 	ok := call("Coordinator.PollTask", &args, &reply)
 
 	if ok {
-		fmt.Println(reply)
+		//fmt.Println(reply)
 	} else {
 		fmt.Printf("call failed!\n")
+		reply.TaskType = ExitTask
 	}
 	return reply
 
@@ -158,7 +164,7 @@ func doMapTask(mapf func(string, string) []KeyValue, response *Task) {
 		hashedKV[ihash(kv.Key)%reducerNum] = append(hashedKV[ihash(kv.Key)%reducerNum], kv)
 	}
 	for i := 0; i < reducerNum; i++ {
-		oname := "./MapOut/mr-tmp-" + strconv.Itoa(response.TaskId) + "-" + strconv.Itoa(i)
+		oname := "mr-tmp-" + strconv.Itoa(response.TaskId) + "-" + strconv.Itoa(i)
 		ofile, _ := os.Create(oname)
 		enc := json.NewEncoder(ofile)
 		for _, kv := range hashedKV[i] {
@@ -176,8 +182,7 @@ func doReduceTask(reducef func(string, []string) string, response *Task) {
 	reduceFileNum := response.TaskId
 	intermediate := shuffle(response.FileSlice)
 	dir, _ := os.Getwd()
-	tempFile, err := ioutil.TempFile(dir+"/ReduceOut/", "mr-tmp-*")
-	fmt.Printf(dir + "/ReduceOut/")
+	tempFile, err := ioutil.TempFile(dir, "mr-tmp-*")
 	if err != nil {
 		log.Fatal("Failed to create temp file", err)
 	}
@@ -196,16 +201,14 @@ func doReduceTask(reducef func(string, []string) string, response *Task) {
 		i = j
 	}
 	tempFile.Close()
-	fn := fmt.Sprintf(dir+"/ReduceOut/mr-out-%d", reduceFileNum)
+	fn := fmt.Sprintf("mr-out-%d", reduceFileNum)
 	os.Rename(tempFile.Name(), fn)
 }
 
 func shuffle(files []string) []KeyValue {
 	var kva []KeyValue
-	dir, _ := os.Getwd()
 	for _, f := range files {
-		path := dir + "/MapOut/" + f
-		file, _ := os.Open(path)
+		file, _ := os.Open(f)
 		dec := json.NewDecoder(file)
 		for {
 			var kv KeyValue
@@ -230,7 +233,7 @@ func callDone(f *Task) Task {
 	ok := call("Coordinator.MarkFinished", &args, &reply)
 
 	if ok {
-		fmt.Println(reply)
+		//fmt.Println("worker finish :taskId[", args.TaskId, "]")
 	} else {
 		fmt.Printf("Coordinator.MarkFinished() call failed!\n")
 	}

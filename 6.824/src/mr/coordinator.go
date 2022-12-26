@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var mu sync.Mutex
@@ -33,8 +34,9 @@ type TaskMetaHolder struct {
 }
 
 type TaskMetaInfo struct {
-	state   State
-	TaskAdr *Task
+	state     State
+	StartTime time.Time
+	TaskAdr   *Task
 }
 
 // Your code here -- RPC handlers for the worker to call.
@@ -77,7 +79,8 @@ func (c *Coordinator) Done() bool {
 	defer mu.Unlock()
 
 	if c.MrPhase == AllDone {
-		fmt.Printf("All tasks are finished,the coordinator will be exit! !")
+		fmt.Printf("All tasks are finished,the coordinator will be exiting...")
+		time.Sleep(time.Second * 5)
 		return true
 	}
 
@@ -102,10 +105,13 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	}
 	c.makeMapTasks(files)
 
-	os.Mkdir("MapOut/", os.ModePerm)
-	os.Mkdir("ReduceOut/", os.ModePerm)
+	//os.Mkdir("MapOut/", os.ModePerm)
+	//os.Mkdir("ReduceOut/", os.ModePerm)
 
 	c.server()
+
+	go c.CrashHandler()
+
 	return &c
 }
 
@@ -178,8 +184,7 @@ func (t *TaskMetaHolder) acceptMeta(TaskInfo *TaskMetaInfo) bool {
 func selectReduceName(reduceNum int) []string {
 	var s []string
 	dir, _ := os.Getwd()
-	path := dir + "/MapOut/"
-	files, _ := ioutil.ReadDir(path)
+	files, _ := ioutil.ReadDir(dir)
 	for _, fi := range files {
 		if strings.HasPrefix(fi.Name(), "mr-tmp") && strings.HasSuffix(fi.Name(), strconv.Itoa(reduceNum)) {
 			s = append(s, fi.Name())
@@ -221,7 +226,7 @@ func (c *Coordinator) PollTask(args *TaskArgs, reply *Task) error {
 			}
 			return nil
 		}
-	} else {
+	} else if c.MrPhase == AllDone {
 		reply.TaskType = ExitTask
 	}
 
@@ -284,6 +289,7 @@ func (t *TaskMetaHolder) judgeState(taskId int) bool {
 		return false
 	}
 	taskInfo.state = Working
+	taskInfo.StartTime = time.Now()
 	return true
 }
 
@@ -314,5 +320,39 @@ func (c *Coordinator) MarkFinished(args *Task, reply *Task) error {
 		panic("The task type is undefined ! ! !")
 	}
 	return nil
+
+}
+
+//
+//coroutine that send failded tasks back to channel
+//
+func (c *Coordinator) CrashHandler() {
+	for {
+		time.Sleep(time.Second * 2)
+		mu.Lock()
+		if c.MrPhase == AllDone {
+			mu.Unlock()
+			break
+		}
+
+		for _, v := range c.taskMetaHolder.MetaMap {
+			// if v.state == Working {
+			// 	fmt.Println("task[", v.TaskAdr.TaskId, "] is working: ", time.Since(v.StartTime), "s")
+			// }
+
+			if v.state == Working && time.Since(v.StartTime) > 10*time.Second {
+				fmt.Printf(" Task[ %d ] crashed, after running for [%d] seconds\n", v.TaskAdr.TaskId, time.Since(v.StartTime))
+
+				if v.TaskAdr.TaskType == MapTask {
+					c.TaskChannelMap <- v.TaskAdr
+					v.state = Waiting
+				} else if v.TaskAdr.TaskType == ReduceTask {
+					c.TaskChannelReduce <- v.TaskAdr
+					v.state = Waiting
+				}
+			}
+		}
+		mu.Unlock()
+	}
 
 }
